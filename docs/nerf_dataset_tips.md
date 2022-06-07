@@ -26,7 +26,7 @@ It is worth checking the alignment of your cameras to this bounding box by check
 
 <img src="assets/nerfbox.jpg" width="100%"/>
 
-For natural scenes where there is a background visible outside the unit cube, it is necessary to set the parameter `aabb_scale` in the `transforms.json` file to a power of 2 integer up to 16 (that is 1, 2, 4, 8, or 16), at the outermost scope (same nesting as e.g. the existing `camera_angle_x` parameter). See [data/nerf/fox/transforms.json](/data/nerf/fox/transforms.json) for an example.
+For natural scenes where there is a background visible outside the unit cube, it is necessary to set the parameter `aabb_scale` in the `transforms.json` file to a power of 2 integer up to 128 (that is 1, 2, 4, 8, ..., 128), at the outermost scope (same nesting as e.g. the existing `camera_angle_x` parameter). See [data/nerf/fox/transforms.json](/data/nerf/fox/transforms.json) for an example.
 
 The effect can be seen in the image below:
 
@@ -51,7 +51,7 @@ See [nerf_loader.cu](src/nerf_loader.cu) for implementation details and addition
 
 ## Preparing new NeRF datasets
 
-Make sure that you have installed [COLMAP](https://colmap.github.io/) and that it is available in your PATH. If you are using a video file as input, also be sure to install [FFmpeg](https://www.ffmpeg.org/) and make sure that it is available in your PATH.
+Make sure that you have installed [COLMAP](https://colmap.github.io/) and that both its `bin` and `lib` folder are available in your PATH. If you are using a video file as input, also be sure to install [FFmpeg](https://www.ffmpeg.org/) and make sure that it is available in your PATH.
 To check that this is the case, from a terminal window, you should be able to run `colmap` and `ffmpeg -?` and see some help text from each.
 
 If you are training from a video file, run the [scripts/colmap2nerf.py](/scripts/colmap2nerf.py) script from the folder containing the video, with the following recommended parameters:
@@ -73,7 +73,7 @@ The script will run FFmpeg and/or COLMAP as needed, followed by a conversion ste
 By default, the script invokes colmap with the "sequential matcher", which is suitable for images taken from a smoothly changing camera path, as in a video. The exhaustive matcher is more appropriate if the images are in no particular order, as shown in the image example above.
 For more options, you can run the script with `--help`. For more advanced uses of COLMAP or for challenging scenes, please see the [COLMAP documentation](https://colmap.github.io/cli.html); you may need to modify the [scripts/colmap2nerf.py](/scripts/colmap2nerf.py) script itself.
 
-The `aabb_scale` parameter is the most important `instant-ngp` specific parameter. It specifies the extent of the scene, defaulting to 1; that is, the scene is scaled such that the camera positions are at an average distance of 1 unit from the origin. For small synthetic scenes such as the original NeRF dataset, the default `aabb_scale` of 1 is ideal and leads to fastest training. The NeRF model makes the assumption that the training images can entirely be explained by a scene contained within this bounding box. However, for natural scenes where there is a background that extends beyond this bounding box, the NeRF model will struggle and may hallucinate "floaters" at the boundaries of the box. By setting `aabb_scale` to a larger power of 2 (up to a maximum of 16), the NeRF model will extend rays to a much larger bounding box. Note that this can impact training speed slightly. If in doubt, for natural scenes, start with an `aabb_scale` of 16, and subsequently reduce it if possible. The value can be directly edited in the `transforms.json` output file, without re-running the [scripts/colmap2nerf.py](/scripts/colmap2nerf.py) script.
+The `aabb_scale` parameter is the most important `instant-ngp` specific parameter. It specifies the extent of the scene, defaulting to 1; that is, the scene is scaled such that the camera positions are at an average distance of 1 unit from the origin. For small synthetic scenes such as the original NeRF dataset, the default `aabb_scale` of 1 is ideal and leads to fastest training. The NeRF model makes the assumption that the training images can entirely be explained by a scene contained within this bounding box. However, for natural scenes where there is a background that extends beyond this bounding box, the NeRF model will struggle and may hallucinate "floaters" at the boundaries of the box. By setting `aabb_scale` to a larger power of 2 (up to a maximum of 16), the NeRF model will extend rays to a much larger bounding box. Note that this can impact training speed slightly. If in doubt, for natural scenes, start with an `aabb_scale` of 128, and subsequently reduce it if possible. The value can be directly edited in the `transforms.json` output file, without re-running the [scripts/colmap2nerf.py](/scripts/colmap2nerf.py) script.
 
 Assuming success, you can now train your NeRF model as follows, starting in the `instant-ngp` folder:
 

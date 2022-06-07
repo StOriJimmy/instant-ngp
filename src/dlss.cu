@@ -37,6 +37,9 @@ static_assert(false, "DLSS can only be compiled when both Vulkan and GUI support
 #include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_vk.h>
 
+#include <codecvt>
+#include <locale>
+
 using namespace Eigen;
 using namespace tcnn;
 namespace fs = filesystem;
@@ -53,7 +56,8 @@ NGP_NAMESPACE_BEGIN
 
 std::string ngx_error_string(NVSDK_NGX_Result result) {
 	std::wstring wstr = GetNGXResultAsString(result);
-	return std::string(std::begin(wstr), std::end(wstr));
+	std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
+	return converter.to_bytes(wstr);
 };
 
 /// Checks the result of a NVSDK_NGX_XXXXXX call and throws an error on failure
@@ -65,6 +69,7 @@ std::string ngx_error_string(NVSDK_NGX_Result result) {
 	} while(0)
 
 static VkInstance vk_instance = VK_NULL_HANDLE;
+static VkDebugUtilsMessengerEXT vk_debug_messenger = VK_NULL_HANDLE;
 static VkPhysicalDevice vk_physical_device = VK_NULL_HANDLE;
 static VkDevice vk_device = VK_NULL_HANDLE;
 static VkQueue vk_queue = VK_NULL_HANDLE;
@@ -85,6 +90,23 @@ uint32_t vk_find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags propert
 	}
 
 	throw std::runtime_error{"Failed to find suitable memory type."};
+}
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(
+	VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+	VkDebugUtilsMessageTypeFlagsEXT message_type,
+	const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
+	void* user_data
+) {
+	if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+		tlog::warning() << "Vulkan error: " << callback_data->pMessage;
+	} else if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+		tlog::warning() << "Vulkan: " << callback_data->pMessage;
+	} else {
+		tlog::info() << "Vulkan: " << callback_data->pMessage;
+	}
+
+	return VK_FALSE;
 }
 
 void vulkan_and_ngx_init() {
@@ -115,6 +137,32 @@ void vulkan_and_ngx_init() {
 	instance_create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 	instance_create_info.pApplicationInfo = &app_info;
 
+	uint32_t available_layer_count;
+	vkEnumerateInstanceLayerProperties(&available_layer_count, nullptr);
+
+	std::vector<VkLayerProperties> available_layers(available_layer_count);
+	vkEnumerateInstanceLayerProperties(&available_layer_count, available_layers.data());
+
+	std::vector<const char*> layers;
+	auto try_add_layer = [&](const char* layer) {
+		for (const auto& props : available_layers) {
+			if (strcmp(layer, props.layerName)) {
+				layers.emplace_back(layer);
+				return true;
+			}
+		}
+
+		return false;
+	};
+
+	bool validation_layer_enabled = try_add_layer("VK_LAYER_KHRONOS_validation");
+	if (!validation_layer_enabled) {
+		tlog::warning() << "Vulkan validation layer is not available. Vulkan errors will be difficult to diagnose.";
+	}
+
+	instance_create_info.enabledLayerCount = static_cast<uint32_t>(layers.size());
+	instance_create_info.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
+
 	std::vector<const char*> instance_extensions;
 	std::vector<const char*> device_extensions;
 
@@ -130,10 +178,14 @@ void vulkan_and_ngx_init() {
 		instance_extensions.emplace_back(ngx_instance_extensions[i]);
 	}
 
-	instance_extensions.emplace_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+	instance_extensions.emplace_back(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME);
+	instance_extensions.emplace_back(VK_KHR_EXTERNAL_FENCE_CAPABILITIES_EXTENSION_NAME);
 	instance_extensions.emplace_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
 	instance_extensions.emplace_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-	instance_extensions.emplace_back(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME);
+
+	if (validation_layer_enabled) {
+		instance_extensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+	}
 
 	for (uint32_t i = 0; i < n_ngx_device_extensions; ++i) {
 		device_extensions.emplace_back(ngx_device_extensions[i]);
@@ -150,13 +202,33 @@ void vulkan_and_ngx_init() {
 	instance_create_info.enabledExtensionCount = (uint32_t)instance_extensions.size();
 	instance_create_info.ppEnabledExtensionNames = instance_extensions.data();
 
-	const std::vector<const char*> validation_layers = {
-		"VK_LAYER_KHRONOS_validation"
-	};
-	instance_create_info.enabledLayerCount = static_cast<uint32_t>(validation_layers.size());
-	instance_create_info.ppEnabledLayerNames = validation_layers.data();
+	VkDebugUtilsMessengerCreateInfoEXT debug_messenger_create_info = {};
+	debug_messenger_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+	debug_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+	debug_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+	debug_messenger_create_info.pfnUserCallback = vk_debug_callback;
+	debug_messenger_create_info.pUserData = nullptr;
+
+	if (validation_layer_enabled) {
+		instance_create_info.pNext = &debug_messenger_create_info;
+	}
 
 	VK_CHECK_THROW(vkCreateInstance(&instance_create_info, nullptr, &vk_instance));
+
+	if (validation_layer_enabled) {
+		auto CreateDebugUtilsMessengerEXT = [](VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
+			auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+			if (func != nullptr) {
+				return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+			} else {
+				return VK_ERROR_EXTENSION_NOT_PRESENT;
+			}
+		};
+
+		if (CreateDebugUtilsMessengerEXT(vk_instance, &debug_messenger_create_info, nullptr, &vk_debug_messenger) != VK_SUCCESS) {
+			tlog::warning() << "Vulkan: could not initialize debug messenger.";
+		}
+	}
 
 	// -------------------------------
 	// Vulkan Physical Device
@@ -267,13 +339,17 @@ void vulkan_and_ngx_init() {
 	device_create_info.pEnabledFeatures = &device_features;
 	device_create_info.enabledExtensionCount = (uint32_t)device_extensions.size();
 	device_create_info.ppEnabledExtensionNames = device_extensions.data();
-	device_create_info.enabledLayerCount = static_cast<uint32_t>(validation_layers.size());
-	device_create_info.ppEnabledLayerNames = validation_layers.data();
+	device_create_info.enabledLayerCount = static_cast<uint32_t>(layers.size());
+	device_create_info.ppEnabledLayerNames = layers.data();
 
+#ifdef VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME
 	VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_feature = {};
 	buffer_device_address_feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT;
 	buffer_device_address_feature.bufferDeviceAddress = VK_TRUE;
 	device_create_info.pNext = &buffer_device_address_feature;
+#else
+	throw std::runtime_error{"Buffer device address extension not available."};
+#endif
 
 	VK_CHECK_THROW(vkCreateDevice(vk_physical_device, &device_create_info, nullptr, &vk_device));
 
@@ -305,7 +381,8 @@ void vulkan_and_ngx_init() {
 	path = fs::path::getcwd().wstr();
 #else
 	std::string tmp = fs::path::getcwd().str();
-	path = std::wstring(tmp.begin(), tmp.end());
+	std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
+	path = converter.from_bytes(tmp);
 #endif
 
 	NGX_CHECK_THROW(NVSDK_NGX_VULKAN_Init_with_ProjectID("ea75345e-5a42-4037-a5c9-59bf94dee157", NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0.0", path.c_str(), vk_instance, vk_physical_device, vk_device));
@@ -680,7 +757,7 @@ DlssFeatureSpecs dlss_feature_specs(const Eigen::Vector2i& out_resolution, EDlss
 
 class DlssFeature {
 public:
-	DlssFeature(const DlssFeatureSpecs& specs, bool is_hdr) : m_specs{specs}, m_is_hdr{is_hdr} {
+	DlssFeature(const DlssFeatureSpecs& specs, bool is_hdr, bool sharpen) : m_specs{specs}, m_is_hdr{is_hdr}, m_sharpen{sharpen} {
 		// Initialize DLSS
 		unsigned int creation_node_mask = 1;
 		unsigned int visibility_node_mask = 1;
@@ -690,7 +767,7 @@ public:
 		dlss_create_feature_flags |= false ? NVSDK_NGX_DLSS_Feature_Flags_MVJittered : 0;
 		dlss_create_feature_flags |= is_hdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0;
 		dlss_create_feature_flags |= false ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0;
-		dlss_create_feature_flags |= false ? NVSDK_NGX_DLSS_Feature_Flags_DoSharpening : 0;
+		dlss_create_feature_flags |= sharpen ? NVSDK_NGX_DLSS_Feature_Flags_DoSharpening : 0;
 		dlss_create_feature_flags |= false ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0;
 
 		NVSDK_NGX_DLSS_Create_Params dlss_create_params;
@@ -712,8 +789,8 @@ public:
 		}
 	}
 
-	DlssFeature(const Eigen::Vector2i& out_resolution, bool is_hdr, EDlssQuality quality)
-	: DlssFeature{dlss_feature_specs(out_resolution, quality), is_hdr} {}
+	DlssFeature(const Eigen::Vector2i& out_resolution, bool is_hdr, bool sharpen, EDlssQuality quality)
+	: DlssFeature{dlss_feature_specs(out_resolution, quality), is_hdr, sharpen} {}
 
 	~DlssFeature() {
 		cudaDeviceSynchronize();
@@ -728,6 +805,7 @@ public:
 	void run(
 		const Vector2i& in_resolution,
 		const Vector2f& jitter_offset,
+		float sharpening,
 		bool shall_reset,
 		NVSDK_NGX_Resource_VK& frame,
 		NVSDK_NGX_Resource_VK& depth,
@@ -735,6 +813,10 @@ public:
 		NVSDK_NGX_Resource_VK& exposure,
 		NVSDK_NGX_Resource_VK& output
 	) {
+		if (!m_sharpen && sharpening != 0.0f) {
+			throw std::runtime_error{"May only specify non-zero sharpening, when DlssFeature has been created with sharpen option."};
+		}
+
 		vk_command_buffer_begin();
 
 		NVSDK_NGX_VK_DLSS_Eval_Params dlss_params;
@@ -747,7 +829,7 @@ public:
 		dlss_params.pInExposureTexture = &exposure;
 		dlss_params.InJitterOffsetX = jitter_offset.x();
 		dlss_params.InJitterOffsetY = jitter_offset.y();
-		dlss_params.Feature.InSharpness = 0.0f;
+		dlss_params.Feature.InSharpness = sharpening;
 		dlss_params.InReset = shall_reset;
 		dlss_params.InMVScaleX = 1.0f;
 		dlss_params.InMVScaleY = 1.0f;
@@ -760,6 +842,10 @@ public:
 
 	bool is_hdr() const {
 		return m_is_hdr;
+	}
+
+	bool sharpen() const {
+		return m_sharpen;
 	}
 
 	EDlssQuality quality() const {
@@ -778,6 +864,7 @@ private:
 	NVSDK_NGX_Handle* m_ngx_dlss = {};
 	DlssFeatureSpecs m_specs;
 	bool m_is_hdr;
+	bool m_sharpen;
 };
 
 class Dlss : public IDlss {
@@ -797,10 +884,12 @@ public:
 		for (int i = 0; i < (int)EDlssQuality::NumDlssQualitySettings; ++i) {
 			try {
 				auto specs = dlss_feature_specs(out_resolution, (EDlssQuality)i);
-				auto feature_hdr = std::make_shared<DlssFeature>(specs, true);
-				auto feature_ldr = std::make_shared<DlssFeature>(specs, false);
 
-				// Only emplase the specs if the feature can be created in practice!
+				// Only emplace the specs if the feature can be created in practice!
+				DlssFeature{specs, true, true};
+				DlssFeature{specs, true, false};
+				DlssFeature{specs, false, true};
+				DlssFeature{specs, false, false};
 				m_dlss_specs.emplace_back(specs);
 			} catch (...) {}
 		}
@@ -814,6 +903,7 @@ public:
 	void run(
 		const Vector2i& in_resolution,
 		bool is_hdr,
+		float sharpening,
 		const Vector2f& jitter_offset,
 		bool shall_reset
 	) override {
@@ -832,13 +922,15 @@ public:
 			throw std::runtime_error{"Dlss::run called with invalid input resolution."};
 		}
 
-		if (!m_dlss_feature || m_dlss_feature->is_hdr() != is_hdr || m_dlss_feature->quality() != quality) {
-			m_dlss_feature.reset(new DlssFeature{m_out_resolution, is_hdr, quality});
+		bool sharpen = sharpening != 0.0f;
+		if (!m_dlss_feature || m_dlss_feature->is_hdr() != is_hdr || m_dlss_feature->sharpen() != sharpen || m_dlss_feature->quality() != quality) {
+			m_dlss_feature.reset(new DlssFeature{m_out_resolution, is_hdr, sharpen, quality});
 		}
 
 		m_dlss_feature->run(
 			in_resolution,
 			jitter_offset,
+			sharpening,
 			shall_reset,
 			m_frame_buffer.ngx_resource(),
 			m_depth_buffer.ngx_resource(),
@@ -926,6 +1018,17 @@ void vulkan_and_ngx_destroy() {
 
 	if (vk_device) {
 		vkDestroyDevice(vk_device, nullptr);
+	}
+
+	if (vk_debug_messenger) {
+		auto DestroyDebugUtilsMessengerEXT = [](VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
+			auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+			if (func != nullptr) {
+				func(instance, debugMessenger, pAllocator);
+			}
+		};
+
+		DestroyDebugUtilsMessengerEXT(vk_instance, vk_debug_messenger, nullptr);
 	}
 
 	if (vk_instance) {

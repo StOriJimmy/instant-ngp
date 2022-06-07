@@ -209,7 +209,8 @@ public:
 		const Eigen::Array3f& exposure,
 		const Eigen::Array4f& background_color,
 		EColorSpace output_color_space,
-		const __half* __restrict__ image,
+		const void* __restrict__ image,
+		EImageDataType image_data_type,
 		const Eigen::Vector2i& resolution,
 		int fov_axis,
 		float zoom,
@@ -239,6 +240,9 @@ public:
 
 	void enable_dlss(const Eigen::Vector2i& out_res);
 	void disable_dlss();
+	void set_dlss_sharpening(float value) {
+		m_dlss_sharpening = value;
+	}
 
 	const std::shared_ptr<IDlss>& dlss() const {
 		return m_dlss;
@@ -250,6 +254,7 @@ private:
 	ETonemapCurve m_tonemap_curve = ETonemapCurve::Identity;
 
 	std::shared_ptr<IDlss> m_dlss;
+	float m_dlss_sharpening = 0.0f;
 
 	Eigen::Vector2i m_in_resolution = Eigen::Vector2i::Zero();
 

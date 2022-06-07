@@ -336,13 +336,15 @@ __global__ void overlay_image_kernel(
 	float alpha,
 	Array3f exposure,
 	Array4f background_color,
-	const __half* __restrict__ image,
+	const void* __restrict__ image,
+	EImageDataType image_data_type,
 	Vector2i image_resolution,
 	ETonemapCurve tonemap_curve,
 	EColorSpace color_space,
 	EColorSpace output_color_space,
 	int fov_axis,
-	float zoom, Eigen::Vector2f screen_center,
+	float zoom,
+	Eigen::Vector2f screen_center,
 	cudaSurfaceObject_t surface
 ) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
@@ -368,12 +370,13 @@ __global__ void overlay_image_kernel(
 	uint32_t idx = x + resolution.x() * y;
 	uint32_t srcidx = srcx + image_resolution.x() * srcy;
 
-	__half val[4];
+	Array4f val;
 	if (srcx >= image_resolution.x() || srcy >= image_resolution.y() || srcx < 0 || srcy < 0) {
-		*(uint64_t*)&val[0] = 0;
+		val = Array4f::Zero();
 	} else {
-		*(uint64_t*)&val[0] = ((uint64_t*)image)[srcidx];
+		val = read_rgba(Vector2i{srcx, srcy}, image_resolution, image, image_data_type);
 	}
+
 	Array4f color = {val[0], val[1], val[2], val[3]};
 
 	// The background color is represented in SRGB, so convert
@@ -468,7 +471,7 @@ __global__ void overlay_false_color_kernel(Vector2i resolution, Vector2i trainin
 	surf2Dwrite(to_float4(color), surface, x * sizeof(float4), y);
 }
 
-__global__ void tonemap_kernel(Vector2i resolution, float exposure, Array4f background_color, Array4f* accumulate_buffer, EColorSpace color_space, EColorSpace output_color_space, ETonemapCurve tonemap_curve, cudaSurfaceObject_t surface) {
+__global__ void tonemap_kernel(Vector2i resolution, float exposure, Array4f background_color, Array4f* accumulate_buffer, EColorSpace color_space, EColorSpace output_color_space, ETonemapCurve tonemap_curve, bool clamp_output_color, cudaSurfaceObject_t surface) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
 	uint32_t y = threadIdx.y + blockDim.y * blockIdx.y;
 
@@ -490,7 +493,9 @@ __global__ void tonemap_kernel(Vector2i resolution, float exposure, Array4f back
 	color.w() += weight;
 
 	color.head<3>() = tonemap(color.head<3>(), Array3f::Constant(exposure), tonemap_curve, color_space, output_color_space);
-	color = color.cwiseMax(0.0f).cwiseMin(1.0f);
+	if (clamp_output_color) {
+		color = color.cwiseMax(0.0f).cwiseMin(1.0f);
+	}
 
 	surf2Dwrite(to_float4(color), surface, x * sizeof(float4), y);
 }
@@ -568,6 +573,7 @@ void CudaRenderBuffer::tonemap(float exposure, const Array4f& background_color, 
 		m_color_space,
 		output_color_space,
 		m_tonemap_curve,
+		m_dlss && output_color_space == EColorSpace::SRGB,
 		m_dlss ? m_dlss->frame() : surface()
 	);
 
@@ -580,6 +586,7 @@ void CudaRenderBuffer::tonemap(float exposure, const Array4f& background_color, 
 		m_dlss->run(
 			res,
 			output_color_space == EColorSpace::Linear, /* HDR mode */
+			m_dlss_sharpening,
 			Vector2f::Constant(0.5f) - ld_random_pixel_offset(sample_index), /* jitter offset in [-0.5, 0.5] */
 			sample_index == 0 /* reset history */
 		);
@@ -595,7 +602,8 @@ void CudaRenderBuffer::overlay_image(
 	const Eigen::Array3f& exposure,
 	const Array4f& background_color,
 	EColorSpace output_color_space,
-	const __half* __restrict__ image,
+	const void* __restrict__ image,
+	EImageDataType image_data_type,
 	const Vector2i& image_resolution,
 	int fov_axis,
 	float zoom,
@@ -611,6 +619,7 @@ void CudaRenderBuffer::overlay_image(
 		exposure,
 		background_color,
 		image,
+		image_data_type,
 		image_resolution,
 		m_tonemap_curve,
 		m_color_space,

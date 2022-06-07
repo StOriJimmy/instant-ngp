@@ -56,6 +56,7 @@ def parse_args():
 
 	parser.add_argument("--sharpen", default=0, help="Set amount of sharpening applied to NeRF training images.")
 
+
 	args = parser.parse_args()
 	return args
 
@@ -100,11 +101,10 @@ if __name__ == "__main__":
 	if not os.path.isabs(network):
 		network = os.path.join(configs_dir, network)
 
-
 	testbed = ngp.Testbed(mode)
 	testbed.nerf.sharpen = float(args.sharpen)
 
-	if args.mode == "sdf":
+	if mode == ngp.TestbedMode.Sdf:
 		testbed.tonemap_curve = ngp.TonemapCurve.ACES
 
 	if args.scene:
@@ -112,6 +112,7 @@ if __name__ == "__main__":
 		if not os.path.exists(args.scene) and args.scene in scenes:
 			scene = os.path.join(scenes[args.scene]["data_dir"], scenes[args.scene]["dataset"])
 		testbed.load_training_data(scene)
+
 
 	if args.load_snapshot:
 		print("Loading snapshot ", args.load_snapshot)
@@ -135,6 +136,7 @@ if __name__ == "__main__":
 		testbed.init_window(sw, sh)
 
 	testbed.shall_train = args.train if args.gui else True
+
 
 	testbed.nerf.render_with_camera_distortion = True
 
@@ -174,6 +176,7 @@ if __name__ == "__main__":
 	if n_steps < 0:
 		n_steps = 100000
 
+	tqdm_last_update = 0
 	if n_steps > 0:
 		with tqdm(desc="Training", total=n_steps, unit="step") as t:
 			while testbed.frame():
@@ -191,9 +194,12 @@ if __name__ == "__main__":
 					old_training_step = 0
 					t.reset()
 
-				t.update(testbed.training_step - old_training_step)
-				t.set_postfix(loss=testbed.loss)
-				old_training_step = testbed.training_step
+				now = time.monotonic()
+				if now - tqdm_last_update > 0.1:
+					t.update(testbed.training_step - old_training_step)
+					t.set_postfix(loss=testbed.loss)
+					old_training_step = testbed.training_step
+					tqdm_last_update = now
 
 	if args.save_snapshot:
 		print("Saving snapshot ", args.save_snapshot)
